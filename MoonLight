@@ -1,0 +1,247 @@
+//D0=16;D1=5;D2=4;D3=0;D4=2;D5=14;D6=12;D7=13;D8=15;D9=3;D10=1
+//state 1 月相模式;2 夜電燈模式;3 循環模式;4 全亮 ;5 關掉
+#include "ESP8266WiFi.h"
+const char* ssid = "ASUS NO1";
+const char* password = "0921822879";
+const char* host = "worldtimeapi.org";  //網頁主機
+const char* url = "/api/timezone/Asia/Taipei";
+const int httpPort = 80;  //網頁伺服器埠號
+int push = 5;     //D1 pin
+int byteReg = 4;  //D2 pin
+int data = 0;     //D3 pin
+int OEpin = 2;   //D4 pin  Note:OE 接地 enable, 高電位 turn off
+int detectWIFI = 12; //D6 pin
+int sensorButton = 15;//D8 pin 偵測按鈕pin
+int moondata[16]={0}; //月相資料暫存空間
+int datain[16] = {0}; 
+unsigned long previousTime = 0; //月燈
+unsigned long previousTime_1 = 0; //夜電燈
+unsigned long previousTime_2 = 0; //循環模式
+int interval = 0; //月燈
+int interval_1 = 0; //夜電燈
+int interval_2 = 0; //循環模式
+int state = 1; //判斷狀態
+int k = 0; //循環模式index
+boolean IS_buttonUP = true; //確認按鈕是否放開
+WiFiClient client;  //客戶端物件
+
+void setup() {
+  pinMode(detectWIFI,OUTPUT);      
+  Serial.begin(115200);   
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { //wifi連接時,閃爍偵測燈 
+    digitalWrite(detectWIFI,true); 
+    delay(200);
+    digitalWrite(detectWIFI, false);
+    delay(200); 
+    Serial.print(".");
+  }
+  pinMode(push,OUTPUT);
+  pinMode(byteReg,OUTPUT);
+  pinMode(data,OUTPUT);
+  pinMode(OEpin,OUTPUT);
+  pinMode(sensorButton,INPUT);
+  Serial.println("");
+  Serial.println("WiFi connected!");  //已連接
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());  //顯示IP位址
+}
+
+void loop() {
+   int date,month,year,num;
+   float phase;
+   unsigned long currentTime = millis();
+   //用按鈕控制模式
+   if(digitalRead(sensorButton) == 1 && IS_buttonUP == true){
+     state += 1;
+     if(state == 6) state = 1;        
+     IS_buttonUP = false;
+   }
+   else if(digitalRead(sensorButton) != 1 && IS_buttonUP != true){
+     IS_buttonUP = true;
+   }
+   delay(20); //debounce 
+   
+   switch(state){
+     case 1:  //顯示月相，一天更新一次
+       if(currentTime - previousTime > interval) {
+         digitalWrite(detectWIFI, true); //當更新資料時，偵測燈開啟              
+         Serial.print("connect to: ");  //顯示網頁主機
+         Serial.println(host);
+         if (!client.connect(host, httpPort)) {
+           Serial.println("connection failed!");  
+           return;
+         }
+         //請求網頁
+         client.print(String("GET ") + url + " HTTP/1.1\r\n" + "Host: " + host + "\r\nConnection: close\r\n\r\n"); 
+         delay(10);
+         
+         while(client.available()){  //取得資料           
+           String line = client.readStringUntil('\r');  //一列資料
+           Serial.print(line);
+           int n = line.indexOf("\"datetime\":");  //尋找「"datetime"」字串
+           if(n >= 0) {
+             Serial.println(line);  //顯示整列資料
+             Serial.print("datetime:");
+             Serial.println(line.substring(n+12, n+36));  //顯示時間資料
+                   
+             year = atoi(line.substring(n+12, n+16).c_str()); //atoi()將字串轉int
+             Serial.print("year: ");
+             Serial.println(year);       
+                          
+             month = atoi(line.substring(n+17, n+19).c_str());
+             Serial.print("month: ");
+             Serial.println(month);
+                         
+             date = atoi(line.substring(n+20, n+22).c_str());
+             Serial.print("date: ");
+             Serial.println(date);    
+             break;
+           }
+         }
+         
+         int moonphase_day = moonPhase_calculator(year,month,date);
+         for(int i=0 ; i<16 ; i++)  datain[i]=0; //初始化陣列            
+        /////將抓下來的時間計算月相//////         
+         if( moonphase_day < 15){
+            phase = moonphase_day/15*100; //轉為百分比
+            num = (int)(8*phase/100 + 0.5);  //表示前排應顯示幾顆 ,(int)(x+0.5)為對x四捨五入
+            for(int i=8+num ; i<16 ; i++) 
+              datain[i]=1;                 
+            for(int i=0 ; i<num ; i++) 
+              datain[i]=1; 
+         }
+         else{
+            phase = 100 - (moonphase_day - 15)/15*100; 
+            num = (int)(8*phase/100 + 0.5);  
+            for(int i=8-num ; i<16-num ; i++) 
+              datain[i]=1;     
+         }
+         
+         for(int i=0 ; i<16 ; i++) // 先將抓下來的資料暫存起來
+            moondata[i] = datain[i];           
+        
+         Serial.print("moonphase_day:");
+         Serial.println(moonphase_day);
+         Serial.print("moonphase_percent:");
+         Serial.print(phase);
+         Serial.println("%");
+         Serial.print("light_number: ");
+         Serial.println(num);
+
+         Serial.println();
+         Serial.println("closing connection!");
+         previousTime = currentTime;
+         interval = 86400000;  //一天更新一次
+         digitalWrite(detectWIFI, false); //抓完資料，偵測燈關閉
+       }
+       for(int i=0 ; i<16 ; i++)
+          datain[i] = moondata[i];     
+       
+       LED_OUT();
+       Var_Bright();
+       break;
+       
+    case 2:  // 夜電燈模式>>>每4秒隨機方向閃爍，再以頻率0.2s全部閃爍2秒
+      if((currentTime / 2000) % 3 < 2){  //每4秒隨機方向閃爍
+        if(currentTime - previousTime_1 > interval_1) {  
+          for(int i=0 ; i<16 ; i++){   //初始化多功器輸出
+            datain[i]=0;
+          }        
+          int a=rand()%15;
+          int b=a+1;
+          int c=rand()%15;
+          int d=c+1;
+          datain[a]=1;
+          datain[b]=1;
+          datain[c]=1;
+          datain[d]=1;
+          previousTime_1 = currentTime;
+          interval_1 = 200;
+        }       
+        LED_OUT();
+        Var_Bright();
+      }
+      else{  //頻率0.1s全部閃爍2秒
+        if((currentTime / 100) % 2 == 0){
+          for(int i=0 ; i<16 ; i++) datain[i]=1;   
+          LED_OUT();
+          Var_Bright();
+        }
+        else{
+          for(int i=0 ; i<16 ; i++) datain[i]=0;   
+          LED_OUT();
+          Var_Bright();      
+        }
+      }
+      break;
+  
+    case 3: //循環燈模式>>>每4秒切換方向循環                       
+      if(currentTime - previousTime_2 > interval_2) {            
+        for(int i=0 ; i<16 ; i++)  datain[i]=0; //初始化多功器輸出                               
+        datain[k]=1;
+        datain[k+1]=1;
+        datain[k+4]=1;
+        datain[k+5]=1;
+        if((currentTime / 4000) % 2 == 0){ //每四秒更換方向循環
+          k+=1;
+          if(k == 11)  k=0;
+        }
+        else{
+          k-=1;
+          if(k == -1)  k=10;                
+        }
+        
+        previousTime_2 = currentTime;
+        interval_2 = 100;
+      }       
+      LED_OUT();
+      Var_Bright();      
+      break;
+      
+    case 4: //全亮模式
+      for(int i=0 ; i<16 ; i++)  datain[i]=1;  
+      LED_OUT();
+      Var_Bright();
+      break;
+
+    case 5: //關掉
+      for(int i=0 ; i<16 ; i++)  datain[i]=0;
+      LED_OUT();
+      break;  
+  }
+}
+
+void LED_OUT(){ 
+  digitalWrite(byteReg, LOW);
+  for (int i=15 ; i>=0 ; i--){
+      digitalWrite(push,LOW);
+      digitalWrite(data,datain[i]);
+      digitalWrite(push,HIGH);
+  }
+  digitalWrite(byteReg, HIGH);  
+}
+
+void Var_Bright(){ //可變電阻調亮度
+  int brightness = analogRead(A0);
+  if(brightness < 15)
+    brightness = 0;
+  if(brightness > 1000)
+    brightness = 1023;
+  analogWrite(OEpin, 1023-brightness);
+}  
+  
+float moonPhase_calculator(int Y,int M,int D){ //計算從新月過了多少日
+  if(Y==1 || Y==2){
+    Y = Y-1;
+    M = M+12;
+  }
+  int C = 2-(Y/100)+(Y/100)/4;
+  float E = 365.25*(Y+4716);
+  float F = 30.6001*(M+1);
+  float JD = C+D+E+F-1524.5;
+  float Day_since_new = JD-2451549.5;//days since the last new moon
+  int q = Day_since_new/29.53;
+  float Days_into_cycle = Day_since_new-29.53*q;//從新月過了多少日  
+  return Days_into_cycle;
+}
